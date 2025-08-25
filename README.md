@@ -36,14 +36,14 @@ python svg_inkscape.py
 
 ### For macOS
 ```bash
-pyinstaller --onefile --windowed --name "SVG Stocker" --icon=icon.icns svg_inkscape.py
+pyinstaller --onefile --windowed --name "SVG Stocker" --icon=icon.icns app.py
 ```
 - Ensure `icon.icns` is present in the project root
 - The executable will be created in the `dist` directory
 
 ### For Windows
 ```bash
-pyinstaller --onefile --windowed --name "SVG Stocker" --icon=icon.ico svg_inkscape.py
+pyinstaller --onefile --windowed --name "SVG Stocker" --icon=icon.ico app.py
 ```
 - Convert `icon.icns` to `icon.ico` using an icon converter tool
 - Place `icon.ico` in the project root
