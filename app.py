@@ -11,6 +11,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout
                             QMessageBox, QLineEdit, QComboBox)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
+import cairosvg
+from cairosvg import svg2eps
+from PIL import Image
 import subprocess
 import tempfile
 
@@ -113,98 +116,129 @@ class ConversionWorker(QThread):
         if 'desainstock' in self.selected_formats:
             self.convert_to_jpg(svg_file, base_name, 'Desainstock')
     
-    def get_base_resolution(self):
-        """Get base resolution based on scale factor"""
-        base_width = 1000
-        base_height = 1000
-        return int(base_width * self.scale_factor), int(base_height * self.scale_factor)
+    def _get_svg_dimensions(self, svg_file):
+        """Parse SVG to get its dimensions."""
+        try:
+            import re
+            import xml.etree.ElementTree as ET
+            
+            tree = ET.parse(svg_file)
+            root = tree.getroot()
+            
+            width_str = root.get('width')
+            height_str = root.get('height')
+            
+            width = None
+            height = None
+
+            if width_str:
+                match = re.search(r'(\d+\.?\d*)', width_str)
+                if match:
+                    width = float(match.group(1))
+            
+            if height_str:
+                match = re.search(r'(\d+\.?\d*)', height_str)
+                if match:
+                    height = float(match.group(1))
+
+            if width and height:
+                return width, height
+
+            # Fallback to viewBox if width/height are not present
+            viewBox = root.get('viewBox')
+            if viewBox:
+                parts = viewBox.split()
+                if len(parts) == 4:
+                    return float(parts[2]), float(parts[3])
+            
+            return None, None # Could not determine dimensions
+        except Exception as e:
+            self.log_update.emit(f"Could not parse SVG dimensions for {os.path.basename(svg_file)}: {e}")
+            return None, None
     
     def convert_to_png(self, svg_file, base_name, platform):
-        """Convert SVG to PNG using Inkscape CLI"""
-        width, height = self.get_base_resolution()
+        """Convert SVG to PNG with transparency, preserving aspect ratio."""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.png")
         
-        try:
-            # Find Inkscape executable
-            inkscape_exe = self.find_inkscape()
-            if not inkscape_exe:
-                self.log_update.emit("ERROR: Inkscape not found")
-                return None
-            
-            # Use Inkscape to convert to PNG
-            cmd = [
-                inkscape_exe,
-                "--export-type=png",
-                f"--export-width={width}",
-                f"--export-height={height}",
-                "-o", output_path,
-                svg_file
-            ]
-            
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.log_update.emit(f"Created PNG: {output_path}")
-            return output_path
-            
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            self.log_update.emit(f"ERROR creating PNG: {e}")
-            return None
+        # Convert to PNG with cairosvg, using scale to preserve aspect ratio
+        cairosvg.svg2png(
+            url=svg_file,
+            write_to=output_path,
+            scale=self.scale_factor
+        )
+        
+        self.log_update.emit(f"Created PNG (transparent, scaled by {self.scale_factor}x): {output_path}")
+        return output_path
     
     def convert_to_jpg(self, svg_file, base_name, platform):
-        """Convert SVG to JPG using Inkscape CLI"""
-        width, height = self.get_base_resolution()
+        """Convert SVG to JPG, preserving aspect ratio."""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.jpg")
         
-        try:
-            # Find Inkscape executable
-            inkscape_exe = self.find_inkscape()
-            if not inkscape_exe:
-                self.log_update.emit("ERROR: Inkscape not found")
-                return None
-            
-            # Use Inkscape to convert to JPG
-            cmd = [
-                inkscape_exe,
-                "--export-type=jpg",
-                f"--export-width={width}",
-                f"--export-height={height}",
-                "-o", output_path,
-                svg_file
-            ]
-            
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.log_update.emit(f"Created JPG: {output_path}")
-            return output_path
-            
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            self.log_update.emit(f"ERROR creating JPG: {e}")
-            return None
+        # Convert to PNG first, then to JPG
+        temp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        cairosvg.svg2png(
+            url=svg_file,
+            write_to=temp_png.name,
+            scale=self.scale_factor
+        )
+        
+        # Convert PNG to JPG with white background
+        img = Image.open(temp_png.name)
+        if img.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        
+        img.save(output_path, 'JPEG', quality=95)
+        os.unlink(temp_png.name)
+        
+        self.log_update.emit(f"Created JPG: {output_path}")
+        return output_path
     
     def convert_to_eps(self, svg_file, base_name, platform):
-        """Convert SVG to EPS using Inkscape CLI"""
+        """Convert SVG to EPS using cairosvg with scaling support"""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.eps")
         
         try:
-            # Find Inkscape executable
-            inkscape_exe = self.find_inkscape()
-            if not inkscape_exe:
-                self.log_update.emit("ERROR: Inkscape not found")
+            # Use cairosvg to convert to EPS with scaling
+            svg2eps(
+                url=svg_file,
+                write_to=output_path,
+                scale=self.scale_factor
+            )
+            self.log_update.emit(f"Created EPS (scaled by {self.scale_factor}x): {output_path}")
+        except Exception as e:
+            self.log_update.emit(f"ERROR creating EPS with cairosvg: {e}")
+            # Fallback to Inkscape if cairosvg fails, as it might handle complex SVGs better
+            self.log_update.emit("cairosvg failed, falling back to Inkscape for EPS conversion.")
+            try:
+                inkscape_exe = self.find_inkscape()
+                if not inkscape_exe:
+                    raise FileNotFoundError("Inkscape executable not found for fallback")
+                
+                # Get original dimensions and scale width, preserving aspect ratio
+                width, _ = self._get_svg_dimensions(svg_file)
+                cmd = [inkscape_exe]
+                if width:
+                    cmd.append(f"--export-width={int(width * self.scale_factor)}")
+                else:
+                    # Fallback if dimensions can't be parsed: use a default scaled width
+                    self.log_update.emit(f"Could not determine SVG width, using default for scaling.")
+                    cmd.append(f"--export-width={int(1000 * self.scale_factor)}")
+
+                cmd.extend([
+                    "--export-type=eps",
+                    "-o", output_path,
+                    svg_file
+                ])
+                
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                self.log_update.emit(f"Created EPS (via Inkscape fallback): {output_path}")
+            except Exception as e2:
+                self.log_update.emit(f"ERROR creating EPS with Inkscape fallback: {e2}")
                 return None
-            
-            # Use Inkscape to convert to EPS
-            cmd = [
-                inkscape_exe,
-                "--export-type=eps",
-                "-o", output_path,
-                svg_file
-            ]
-            
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.log_update.emit(f"Created EPS: {output_path}")
-            return output_path
-            
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            self.log_update.emit(f"ERROR creating EPS: {e}")
-            return None
+
+        return output_path
 
     def copy_svg(self, svg_file, base_name, platform):
         """Copy SVG file as-is"""
@@ -245,10 +279,6 @@ class ConversionWorker(QThread):
             # Fallback to basic cropping
             return self.copy_svg(svg_file, base_name, platform)
     
-    # def find_inkscape(self):
-    #     """Find Inkscape executable path"""
-    #     import shutil
-    #     return shutil.which("inkscape")
     def find_inkscape(self):
     # Hardcode untuk Windows
         possible_paths = [
@@ -266,7 +296,6 @@ class ConversionWorker(QThread):
 
         # fallback
         return shutil.which("inkscape")
-
     
     def create_zip_file(self, file_paths, base_name, platform):
         """Create ZIP file containing specified files"""
@@ -342,13 +371,14 @@ class SVGConverterApp(QMainWindow):
         # Log section
         log_section = self.create_log_section()
         layout.addWidget(log_section)
-        
+
         # Footer
-        footer = QLabel('Develop by <a href="http://www.designtools.my.id">www.designtools.my.id</a><br>Version 0.01')
+        footer = QLabel('Develop by <a href="http://www.designtools.my.id">www.designtools.my.id</a><br>Donate to support development <a href="https://saweria.co/mujibanget">Saweria</a><br> Report issue and Feature feedback? <a href="mailto:rbiizulmujib@gmail.com">Send feedback</a><br>Version 0.01')
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.setStyleSheet("font-size: 10px; color: #666;")
         footer.setOpenExternalLinks(True)
         layout.addWidget(footer)
+    
     def create_file_section(self):
         group = QGroupBox("Input Folder")
         layout = QVBoxLayout(group)
@@ -400,7 +430,7 @@ class SVGConverterApp(QMainWindow):
         self.scale_combo.setCurrentIndex(0)  # Default to 1x
         layout.addWidget(self.scale_combo)
         
-        layout.addWidget(QLabel("(Applies to JPG, PNG, and EPS formats)"))
+        layout.addWidget(QLabel("(Preserves original aspect ratio)"))
         layout.addStretch()
         
         return group
@@ -424,6 +454,7 @@ class SVGConverterApp(QMainWindow):
         
         for platform_key, platform_text, row, col in platforms:
             checkbox = QCheckBox(platform_text)
+            checkbox.stateChanged.connect(self._update_start_button_state)
             self.platform_checkboxes[platform_key] = checkbox
             layout.addWidget(checkbox, row, col)
         
@@ -459,7 +490,26 @@ class SVGConverterApp(QMainWindow):
         layout = QHBoxLayout(widget)
         
         self.start_btn = QPushButton("Start Conversion")
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007BFF; /* biru */
+                color: white;
+                border-radius: 4px;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3; /* biru lebih gelap saat hover */
+            }
+            QPushButton:pressed {
+                background-color: #004085; /* biru tua saat ditekan */
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC; /* abu-abu */
+                color: #666666;
+            }
+        """)
         self.start_btn.clicked.connect(self.start_conversion)
+        self.start_btn.setEnabled(False)  # Disable by default
         layout.addWidget(self.start_btn)
         
         self.stop_btn = QPushButton("Stop")
@@ -487,6 +537,13 @@ class SVGConverterApp(QMainWindow):
         
         return group
     
+    def _update_start_button_state(self):
+        """Enable or disable the start button based on conditions."""
+        folder_selected = bool(self.svg_files)
+        platform_selected = any(checkbox.isChecked() for checkbox in self.platform_checkboxes.values())
+        
+        self.start_btn.setEnabled(folder_selected and platform_selected)
+    
     def browse_folder(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Folder with SVG Files")
         
@@ -513,6 +570,8 @@ class SVGConverterApp(QMainWindow):
                 self.output_dir = ""
                 self.log_text.append(f"Selected folder: {directory}")
                 self.log_text.append("WARNING: No SVG files found in the selected folder")
+            
+            self._update_start_button_state()
     
     def select_all_platforms(self):
         for checkbox in self.platform_checkboxes.values():
@@ -618,12 +677,11 @@ class SVGConverterApp(QMainWindow):
         QMessageBox.critical(self, "Error", f"An error occurred: {error_message}")
 
 
-
 def main():
     app = QApplication(sys.argv)
     window = SVGConverterApp()
     window.show()
-    sys.exit(app.exec())
+    app.exec()
 
 
 if __name__ == "__main__":
