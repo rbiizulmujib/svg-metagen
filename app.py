@@ -23,12 +23,13 @@ class ConversionWorker(QThread):
     finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, svg_files, output_dir, selected_formats, scale_factor):
+    def __init__(self, svg_files, output_dir, selected_formats, scale_factor, force_1x1):
         super().__init__()
         self.svg_files = svg_files
         self.output_dir = output_dir
         self.selected_formats = selected_formats
         self.scale_factor = scale_factor
+        self.force_1x1 = force_1x1
         
     def run(self):
         try:
@@ -157,30 +158,48 @@ class ConversionWorker(QThread):
             return None, None
     
     def convert_to_png(self, svg_file, base_name, platform):
-        """Convert SVG to PNG with transparency, preserving aspect ratio."""
+        """Convert SVG to PNG with transparency, with optional 1:1 aspect ratio."""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.png")
         
-        # Convert to PNG with cairosvg, using scale to preserve aspect ratio
-        cairosvg.svg2png(
-            url=svg_file,
-            write_to=output_path,
-            scale=self.scale_factor
-        )
-        
-        self.log_update.emit(f"Created PNG (transparent, scaled by {self.scale_factor}x): {output_path}")
+        if self.force_1x1:
+            base_dim = int(1000 * self.scale_factor)
+            cairosvg.svg2png(
+                url=svg_file,
+                write_to=output_path,
+                output_width=base_dim,
+                output_height=base_dim
+            )
+            self.log_update.emit(f"Created PNG (transparent, {base_dim}x{base_dim}px): {output_path}")
+        else:
+            cairosvg.svg2png(
+                url=svg_file,
+                write_to=output_path,
+                scale=self.scale_factor
+            )
+            self.log_update.emit(f"Created PNG (transparent, scaled by {self.scale_factor}x): {output_path}")
+            
         return output_path
     
     def convert_to_jpg(self, svg_file, base_name, platform):
-        """Convert SVG to JPG, preserving aspect ratio."""
+        """Convert SVG to JPG, with optional 1:1 aspect ratio."""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.jpg")
         
         # Convert to PNG first, then to JPG
         temp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        cairosvg.svg2png(
-            url=svg_file,
-            write_to=temp_png.name,
-            scale=self.scale_factor
-        )
+        if self.force_1x1:
+            base_dim = int(1000 * self.scale_factor)
+            cairosvg.svg2png(
+                url=svg_file,
+                write_to=temp_png.name,
+                output_width=base_dim,
+                output_height=base_dim
+            )
+        else:
+            cairosvg.svg2png(
+                url=svg_file,
+                write_to=temp_png.name,
+                scale=self.scale_factor
+            )
         
         # Convert PNG to JPG with white background
         img = Image.open(temp_png.name)
@@ -200,13 +219,22 @@ class ConversionWorker(QThread):
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.eps")
         
         try:
-            # Use cairosvg to convert to EPS with scaling
-            svg2eps(
-                url=svg_file,
-                write_to=output_path,
-                scale=self.scale_factor
-            )
-            self.log_update.emit(f"Created EPS (scaled by {self.scale_factor}x): {output_path}")
+            if self.force_1x1:
+                base_dim = int(1000 * self.scale_factor)
+                svg2eps(
+                    url=svg_file,
+                    write_to=output_path,
+                    output_width=base_dim,
+                    output_height=base_dim
+                )
+                self.log_update.emit(f"Created EPS ({base_dim}x{base_dim}px): {output_path}")
+            else:
+                svg2eps(
+                    url=svg_file,
+                    write_to=output_path,
+                    scale=self.scale_factor
+                )
+                self.log_update.emit(f"Created EPS (scaled by {self.scale_factor}x): {output_path}")
         except Exception as e:
             self.log_update.emit(f"ERROR creating EPS with cairosvg: {e}")
             # Fallback to Inkscape if cairosvg fails, as it might handle complex SVGs better
@@ -430,7 +458,9 @@ class SVGConverterApp(QMainWindow):
         self.scale_combo.setCurrentIndex(0)  # Default to 1x
         layout.addWidget(self.scale_combo)
         
-        layout.addWidget(QLabel("(Preserves original aspect ratio)"))
+        self.force_1x1_checkbox = QCheckBox("Force 1:1 Aspect Ratio")
+        layout.addWidget(self.force_1x1_checkbox)
+        
         layout.addStretch()
         
         return group
@@ -560,7 +590,7 @@ class SVGConverterApp(QMainWindow):
             if svg_files:
                 self.file_label.setText(f"Folder: {directory}\n{len(svg_files)} SVG files found")
                 # Auto-generate output directory
-                self.output_dir = os.path.join(directory, "svg_converted_output")
+                self.output_dir = os.path.join(directory, "Microstock_Ready")
                 self.log_text.append(f"Selected folder: {directory}")
                 self.log_text.append(f"Found {len(svg_files)} SVG files")
                 self.log_text.append(f"Output directory: {self.output_dir}")
@@ -625,12 +655,14 @@ class SVGConverterApp(QMainWindow):
         self.progress_bar.setValue(0)
         
         scale_factor = self.scale_combo.currentData()
+        force_1x1 = self.force_1x1_checkbox.isChecked()
         
         self.worker = ConversionWorker(
             self.svg_files, 
             self.output_dir, 
             selected_formats, 
-            scale_factor
+            scale_factor,
+            force_1x1
         )
         
         self.worker.progress_update.connect(self.update_progress)
