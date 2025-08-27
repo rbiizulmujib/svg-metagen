@@ -123,39 +123,19 @@ class ConversionWorker(QThread):
         return int(base_width * self.scale_factor), int(base_height * self.scale_factor)
     
     def convert_to_png(self, svg_file, base_name, platform):
-        """Convert SVG to PNG with RGB color space"""
+        """Convert SVG to PNG with transparency"""
         width, height = self.get_base_resolution()
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.png")
         
-        # Convert to PNG first with cairosvg
-        temp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        # Convert to PNG with cairosvg, which preserves transparency by default
         cairosvg.svg2png(
             url=svg_file,
-            write_to=temp_png.name,
+            write_to=output_path,
             output_width=width,
             output_height=height
         )
         
-        # Ensure RGB color space using PIL
-        img = Image.open(temp_png.name)
-        if img.mode in ('RGBA', 'LA', 'P'):
-            # Convert to RGB with white background
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'RGBA':
-                background.paste(img, mask=img.split()[-1])
-            elif img.mode == 'LA':
-                background.paste(img, mask=img.split()[-1])
-            else:  # P mode
-                img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if len(img.split()) == 4 else None)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        img.save(output_path, 'PNG')
-        os.unlink(temp_png.name)
-        
-        self.log_update.emit(f"Created PNG (RGB): {output_path}")
+        self.log_update.emit(f"Created PNG (transparent): {output_path}")
         return output_path
     
     def convert_to_jpg(self, svg_file, base_name, platform):
@@ -186,67 +166,43 @@ class ConversionWorker(QThread):
         return output_path
     
     def convert_to_eps(self, svg_file, base_name, platform):
-        """Convert SVG to EPS using Inkscape CLI with scaling support"""
+        """Convert SVG to EPS using cairosvg with scaling support"""
         output_path = os.path.join(self.output_dir, platform, f"{base_name}.eps")
         
         try:
-            # Try Inkscape CLI conversion first (vector format)
-            inkscape_exe = self.find_inkscape()
-            if not inkscape_exe:
-                raise FileNotFoundError("Inkscape executable not found")
-            
-            # Get resolution based on scale factor
-            width, height = self.get_base_resolution()
-            
-            # Use Inkscape to convert to EPS with specified dimensions
-            cmd = [
-                inkscape_exe,
-                f"--export-width={width}",
-                f"--export-height={height}",
-                "--export-type=eps",
-                "-o", output_path,
-                svg_file
-            ]
-            
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            self.log_update.emit(f"Created EPS (vector via Inkscape): {output_path}")
+            # Use cairosvg to convert to EPS with scaling
+            svg2eps(
+                url=svg_file,
+                write_to=output_path,
+                scale=self.scale_factor
+            )
+            self.log_update.emit(f"Created EPS (scaled by {self.scale_factor}x): {output_path}")
         except Exception as e:
-            # Fallback: convert via PNG if Inkscape conversion fails
+            self.log_update.emit(f"ERROR creating EPS with cairosvg: {e}")
+            # Fallback to Inkscape if cairosvg fails, as it might handle complex SVGs better
+            self.log_update.emit("cairosvg failed, falling back to Inkscape for EPS conversion.")
             try:
+                inkscape_exe = self.find_inkscape()
+                if not inkscape_exe:
+                    raise FileNotFoundError("Inkscape executable not found for fallback")
+                
                 width, height = self.get_base_resolution()
-                temp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
                 
-                cairosvg.svg2png(
-                    url=svg_file,
-                    write_to=temp_png.name,
-                    output_width=width,
-                    output_height=height
-                )
+                cmd = [
+                    inkscape_exe,
+                    f"--export-width={width}",
+                    f"--export-height={height}",
+                    "--export-type=eps",
+                    "-o", output_path,
+                    svg_file
+                ]
                 
-                # Ensure RGB color space using PIL
-                img = Image.open(temp_png.name)
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    # Convert to RGB with white background
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'RGBA':
-                        background.paste(img, mask=img.split()[-1])
-                    elif img.mode == 'LA':
-                        background.paste(img, mask=img.split()[-1])
-                    else:  # P mode
-                        img = img.convert('RGBA')
-                        background.paste(img, mask=img.split()[-1] if len(img.split()) == 4 else None)
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                img.save(output_path, 'EPS')
-                os.unlink(temp_png.name)
-                
-                self.log_update.emit(f"Created EPS (raster fallback): {output_path}")
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                self.log_update.emit(f"Created EPS (via Inkscape fallback): {output_path}")
             except Exception as e2:
-                self.log_update.emit(f"ERROR creating EPS: {e2}")
+                self.log_update.emit(f"ERROR creating EPS with Inkscape fallback: {e2}")
                 return None
-        
+
         return output_path
 
     def copy_svg(self, svg_file, base_name, platform):
@@ -380,6 +336,13 @@ class SVGConverterApp(QMainWindow):
         # Log section
         log_section = self.create_log_section()
         layout.addWidget(log_section)
+
+        # Footer
+        footer = QLabel('Develop by <a href="http://www.designtools.my.id">www.designtools.my.id</a><br>Donate to support development <a href="https://saweria.co/mujibanget">Saweria</a><br> Report issue and Feature feedback? <a href="mailto:rbiizulmujib@gmail.com">Send feedback</a><br>Version 0.01')
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer.setStyleSheet("font-size: 10px; color: #666;")
+        footer.setOpenExternalLinks(True)
+        layout.addWidget(footer)
     
     def create_file_section(self):
         group = QGroupBox("Input Folder")
@@ -456,6 +419,7 @@ class SVGConverterApp(QMainWindow):
         
         for platform_key, platform_text, row, col in platforms:
             checkbox = QCheckBox(platform_text)
+            checkbox.stateChanged.connect(self._update_start_button_state)
             self.platform_checkboxes[platform_key] = checkbox
             layout.addWidget(checkbox, row, col)
         
@@ -491,7 +455,26 @@ class SVGConverterApp(QMainWindow):
         layout = QHBoxLayout(widget)
         
         self.start_btn = QPushButton("Start Conversion")
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007BFF; /* biru */
+                color: white;
+                border-radius: 4px;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3; /* biru lebih gelap saat hover */
+            }
+            QPushButton:pressed {
+                background-color: #004085; /* biru tua saat ditekan */
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC; /* abu-abu */
+                color: #666666;
+            }
+        """)
         self.start_btn.clicked.connect(self.start_conversion)
+        self.start_btn.setEnabled(False)  # Disable by default
         layout.addWidget(self.start_btn)
         
         self.stop_btn = QPushButton("Stop")
@@ -519,6 +502,13 @@ class SVGConverterApp(QMainWindow):
         
         return group
     
+    def _update_start_button_state(self):
+        """Enable or disable the start button based on conditions."""
+        folder_selected = bool(self.svg_files)
+        platform_selected = any(checkbox.isChecked() for checkbox in self.platform_checkboxes.values())
+        
+        self.start_btn.setEnabled(folder_selected and platform_selected)
+    
     def browse_folder(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Folder with SVG Files")
         
@@ -545,6 +535,8 @@ class SVGConverterApp(QMainWindow):
                 self.output_dir = ""
                 self.log_text.append(f"Selected folder: {directory}")
                 self.log_text.append("WARNING: No SVG files found in the selected folder")
+            
+            self._update_start_button_state()
     
     def select_all_platforms(self):
         for checkbox in self.platform_checkboxes.values():
